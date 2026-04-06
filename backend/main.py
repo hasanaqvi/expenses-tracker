@@ -1,3 +1,7 @@
+import csv
+import io
+from fastapi import File, UploadFile
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -47,3 +51,59 @@ def get_summary():
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+@app.post("/expenses/import")
+async def import_csv(file: UploadFile = File(...)):
+    contents = await file.read()
+    decoded = contents.decode("utf-8")
+    reader = csv.DictReader(io.StringIO(decoded))
+
+    # Auto-categorize based on keywords in the description
+    def categorize(description: str) -> str:
+        description = description.lower()
+        if any(word in description for word in ["restaurant", "cafe", "coffee", "food", "pizza", "burger", "sushi", "chaikhana"]):
+            return "Food"
+        elif any(word in description for word in ["uber", "bolt", "taxi", "train", "metro", "bus", "flight", "ryanair"]):
+            return "Transport"
+        elif any(word in description for word in ["netflix", "spotify", "amazon", "apple", "steam", "cinema"]):
+            return "Entertainment"
+        elif any(word in description for word in ["pharmacy", "doctor", "gym", "health"]):
+            return "Health"
+        elif any(word in description for word in ["rent", "electricity", "gas", "internet", "insurance"]):
+            return "Housing"
+        else:
+            return "Other"
+
+    conn = get_connection()
+    imported = 0
+
+    for row in reader:
+        # Skip non-completed or non-expense transactions
+        if row.get("State", "").strip() != "COMPLETED":
+            continue
+        
+        amount = float(row.get("Amount", 0))
+        if amount >= 0:
+            continue  # Skip income, only import expenses
+
+        # Clean up the date — strip the time portion
+        raw_date = row.get("Started Date", "")
+        date = raw_date.split(" ")[0] if " " in raw_date else raw_date
+
+        description = row.get("Description", "").strip()
+
+        conn.execute(
+            "INSERT INTO expenses (date, amount, category, description, source) VALUES (?, ?, ?, ?, ?)",
+            (
+                date,
+                abs(amount),  # Store as positive number
+                categorize(description),
+                description,
+                "csv"
+            )
+        )
+        imported += 1
+
+    conn.commit()
+    conn.close()
+    return {"message": f"{imported} expenses imported successfully"}
